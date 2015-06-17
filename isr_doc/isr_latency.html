@@ -1,0 +1,192 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title></title>
+  <link rel="stylesheet" href="md.css" type="text/css" />
+</head>
+<body>
+<h1 id="teensy-3.1----interrupt-service-routine-latency">Teensy 3.1 -- Interrupt Service Routine Latency</h1>
+<p>I am in the process of fixing a vintage Ohio Scientific Computer. I could really use a 32 bit logic analyser to record and display the execution of the programs. With more time than money I decided to try out a DIY Logic Analyser using the Teensy.</p>
+<p>My first inclination was to use a synchronous approach with the 6502s clock driving an interrupts on the Teensy. During each interrupt the Teensy would read and save the address, data, and control bits until it filled a memory buffer.</p>
+<p>To make this approach work I needed to process interrupt on the Teensy at 1MHz. In addtion to the time needed to execute the Interrupt Service Routine (ISR), the time to enter and exit the ISR (interrupt latency) needed to be considered. When am interrupt occurs the ARM processor stores state, the Teensy core library interrupt handlers run and then the ISR starts to run.</p>
+<p>I ran two tests to better understand the latency on interrupts. The first was a semi-real-world test with the 6502s clock signal was connected to the Teensy interrupt pin. The 6502 clock would drive interrupts every 1 micro second. The second test was a loop back test where one pin on the Teensy was used to interrupted itself on another pin. I have a small Saleae logic analyser that could monitor these the input/output lines and record timings.</p>
+<p>BTW: I am using Arduino-1.6.1 and Teensy-1.22 software on a Teensy 3.1 And, I am using Makefiles so my code is not exactly Arduino Sketch compatable.</p>
+<hr />
+<p>Test Set-up #1 -- external clock driving Teensy Interrupt<br /><img src="setup_clock.png" /></p>
+<p>With Test #1 the 6502s clock was connected to the Teensy interrupt (pin 4) and the ISR would toggle on/off an output (pin 3). The clock and pulse pins were recorded using the Saleae Logical Analyser. The Read/Write and Data line were just used to ensure the 6502 was alive and running.</p>
+<hr />
+<p>Test Set-up #2 -- loopback trigger driving Teensy Interrupt<br /><img src="setup_pin.png" /></p>
+<p>With this setup the main routine would bring pin 10 high to trigger and interrupt on pin 11. The ISR would bring the trigger pin low and pulse the output pin 12 on/off. Timing was recorded by the Logic Analyser.</p>
+<hr />
+<p>For each test setup I ran four different tests:</p>
+<ul>
+<li>Program compiled with the standard libary</li>
+<li>Program compiled with standard library and FASTRUN option</li>
+<li>Program compiled using a &quot;hacked&quot; verions of the library</li>
+<li>Program compiled with &quot;hacked&quot; library and FASTRUN option</li>
+</ul>
+<p>In the &quot;hacked&quot; version I replaced the standard interrupt handler with my own ISR that toggled an output pin on/off.</p>
+<h2 id="clock-test-results">Clock Test Results</h2>
+<p>The clock test only allowed monitoring of the entry into the ISR. But it provides a &quot;real world&quot; simulation of trying to keep up to the 6502 processor.</p>
+<div class="figure">
+<img src="test1_results.png" /><p class="caption"></p>
+</div>
+<h2 id="pin-loop-back-test-results">Pin Loop-Back Test Results</h2>
+<p>The loopback test allowed monitoring of the entry and exit from the ISR.</p>
+<div class="figure">
+<img src="test2_results.png" /><p class="caption"></p>
+</div>
+<p>After all this testing my conclusion is that I am going to try an asynchronous approach and poll the I/O pins. There is too much overhead in switching in/out of an interrupt for my application.</p>
+<p>John Lockett<br />2015/06/12</p>
+<hr />
+<hr />
+<br><br /><br>
+<h1 id="source-code-and-test-result-details">Source Code and Test Result Details</h1>
+<p>This section provides a few more details on the code and some screenshots of the test results.</p>
+<h2 id="clock-test-isr-program">Clock Test ISR Program</h2>
+<p>The ISR is very simple turn on pin, NOP for a few cycles, turn off pin.</p>
+<pre><code>void isr_clk(void)
+{
+    digitalWriteFast(ISR_PIN, HIGH);
+     __asm__ __volatile__(&quot;NOP&quot;);
+     __asm__ __volatile__(&quot;NOP&quot;);
+     __asm__ __volatile__(&quot;NOP&quot;);
+     __asm__ __volatile__(&quot;NOP&quot;);
+     __asm__ __volatile__(&quot;NOP&quot;);
+    digitalWriteFast(ISR_PIN, LOW);
+}</code></pre>
+<p>I have a few NOPs in the ISR to make the toggle on/off of the pin long enough for nice display on the logic analyser. My Saleae has a max speed is 24MHz and with no NOPs it showed the pulse width as being 41.7nsec (the minimum it can calculate).</p>
+<p>As I increased the number of NOPs the pulse got wider:</p>
+<ul>
+<li>1 NOPs = 41.7nsec</li>
+<li>5 NOPs = 83.2nsec</li>
+<li>10 NOPs = 125nsec</li>
+<li>20 NOPs = 250nsec</li>
+</ul>
+<p>A NOP takes one CPU cycle so at 96MHz, each NOPs should increase execution time by 10nsec. The measurements are pretty close to this.</p>
+<h2 id="clock-test-1----standard-library">Clock Test #1 -- Standard Library</h2>
+<p>My interrupt was configured to trigger on the falling edge of the clock (Channel 0). Channel 1 is the ISR toggling ON/OFF the output line.</p>
+<p>With a standard library &quot;out of the box&quot; solution the time from falling edge of external clock to rising edge of ISR output is 667nanosec.</p>
+<p>So, 670nsec to start the ISR and couple hundred to exit (min 120nsec) does not leave much time for my ISR to process data.</p>
+<p>Standard Library, running from Flash Memory = 667nsec <img src="isr_clock.png" alt="clock isr latency" /></p>
+<h2 id="clock-test-2----standare-library-with-fastrun">Clock Test #2 -- Standare Library with FASTRUN</h2>
+<p>12% improvement by moving the ISR into RAM.</p>
+<p>Standard Library, running from RAM Memory = 583nsec</p>
+<div class="figure">
+<img src="isr_clock_fast.png" alt="clock fast" /><p class="caption">clock fast</p>
+</div>
+<h2 id="hacking-the-teensy-core-library">Hacking the Teensy Core Library</h2>
+<p>The core library contains a interrupt service routine in the pin_teensy.c file. There is one routine for each I/O port (A,B,C,D,E). Each routing figures out which pin caused the interrupt and then calls the service routine that was previously set up using &quot;attachInterrupt&quot;.</p>
+<p>To improve the ISR response time I replaced the PortA routine with my own ISR routine. This reduced the overhead; no decisions to make and no functions to call.</p>
+<p>Standard Port A ISR:</p>
+<pre><code>static void porta_interrupt(void)
+{
+    uint32_t isfr = PORTA_ISFR;
+    PORTA_ISFR = isfr;
+    if ((isfr &amp; CORE_PIN3_BITMASK) &amp;&amp; intFunc[3]) intFunc[3]();
+    if ((isfr &amp; CORE_PIN4_BITMASK) &amp;&amp; intFunc[4]) intFunc[4]();
+    if ((isfr &amp; CORE_PIN24_BITMASK) &amp;&amp; intFunc[24]) intFunc[24]();
+    if ((isfr &amp; CORE_PIN33_BITMASK) &amp;&amp; intFunc[33]) intFunc[33]();
+}</code></pre>
+<p>My &quot;hacked&quot; Interrupt Service Routine:</p>
+<pre><code>static void porta_interrupt(void)
+{
+    uint32_t isfr = PORTA_ISFR;
+    PORTA_ISFR = isfr;
+
+// 2015/06/10
+// Hacked Teensy ISR for fast interrupt response
+//
+#define ISR_PIN 3
+ digitalWriteFast(ISR_PIN, HIGH);
+     __asm__ __volatile__(&quot;NOP&quot;);
+     __asm__ __volatile__(&quot;NOP&quot;);
+     __asm__ __volatile__(&quot;NOP&quot;);
+     __asm__ __volatile__(&quot;NOP&quot;);
+     __asm__ __volatile__(&quot;NOP&quot;);
+   digitalWriteFast(ISR_PIN, LOW);
+}</code></pre>
+<p>The assembler for this ISR was fairly tight with a total of 14 instructions.</p>
+<pre><code> 4dc &lt;porta_interrupt&gt;:
+ 4dc:   4b07        ldr r3, [pc, #28]   ; (4fc &lt;porta_interrupt+0x20&gt;)
+ 4de:   681a        ldr r2, [r3, #0]
+ 4e0:   601a        str r2, [r3, #0]
+ 4e2:   f44f 5380   mov.w   r3, #4096   ; 0x1000
+ 4e6:   4a06        ldr r2, [pc, #24]   ; (500 &lt;porta_interrupt+0x24&gt;)
+ 4e8:   6013        str r3, [r2, #0]
+ 4ea:   bf00        nop
+ 4ec:   bf00        nop
+ 4ee:   bf00        nop
+ 4f0:   bf00        nop
+ 4f2:   bf00        nop
+ 4f4:   3204        adds    r2, #4
+ 4f6:   6013        str r3, [r2, #0]
+ 4f8:   4770        bx  lr
+ 4fa:   bf00        nop
+ 4fc:   400490a0    .word   0x400490a0
+ 500:   400ff004    .word   0x400ff004</code></pre>
+<h2 id="clock-test-3----hacked-library-test">Clock Test #3 -- Hacked Library Test</h2>
+<p>By moving the ISR into the core library there is a 32% improvement over the standard out-of-the-box solution.</p>
+<p>Hacked Library, running from Flash Memory = 453nsec <img src="isr_clock_hack.png" alt="clock hack nofast" /></p>
+<h2 id="clock-test-4----hacked-library-test-with-fastrun">Clock Test #4 -- Hacked Library Test with FASTRUN</h2>
+<p>The last test with the ISR inside the core library and using FASTRUN to move it into memory resulted on a 44% improvment in latency.</p>
+<p>Hacked Library, running from RAM Memory = 375nsec<br /><img src="isr_clock_hack_fast.png" alt="clock hack fast" /></p>
+<h2 id="pin-test-source-code">Pin Test Source Code</h2>
+<p>The code for loop back pin test is very similar to the clock test. The main function simple turns on the trigger pin. The ISR turns it off and main will turn in on again. Again, the ISR has a few NOP to give me a nice display on the Logic Analyser.</p>
+<pre><code>int main(void)
+{
+    setup();
+    while(1) {
+        digitalWriteFast(TRIGGER_PIN, HIGH);
+    } // while
+} // main
+
+
+
+
+// *************************************************
+FASTRUN void isr_clk(void)
+{
+  digitalWriteFast(ISR_PIN, HIGH);
+  digitalWriteFast(TRIGGER_PIN, LOW);
+    __asm__ __volatile(&quot;NOP&quot;);
+    __asm__ __volatile(&quot;NOP&quot;);
+    __asm__ __volatile(&quot;NOP&quot;);
+    __asm__ __volatile(&quot;NOP&quot;);
+    __asm__ __volatile(&quot;NOP&quot;);
+  digitalWriteFast(ISR_PIN, LOW);
+}</code></pre>
+<h2 id="loopback-pin-results-1----standard-library">Loopback Pin Results #1 -- Standard Library</h2>
+<div class="figure">
+<img src="isr_pin_entry.png" /><p class="caption"></p>
+</div>
+<div class="figure">
+<img src="isr_pin_exit.png" /><p class="caption"></p>
+</div>
+<h2 id="loopback-pin-results-2----standard-library-with-fastrun">Loopback Pin Results #2 -- Standard Library with FASTRUN</h2>
+<div class="figure">
+<img src="isr_pin_fast_entry.png" /><p class="caption"></p>
+</div>
+<div class="figure">
+<img src="isr_pin_fast_exit.png" /><p class="caption"></p>
+</div>
+<h2 id="loopback-pin-trigger-results-3----hacked-library">Loopback Pin Trigger Results #3 -- Hacked Library</h2>
+<div class="figure">
+<img src="isr_pin_hack_entry.png" /><p class="caption"></p>
+</div>
+<div class="figure">
+<img src="isr_pin_hack_exit.png" /><p class="caption"></p>
+</div>
+<h2 id="loopback-pin-trigger-results-4----hack-library-with-fastrun">Loopback Pin Trigger Results #4 -- Hack Library with FASTRUN</h2>
+<div class="figure">
+<img src="isr_pin_hack_fast_entry.png" /><p class="caption"></p>
+</div>
+<div class="figure">
+<img src="isr_pin_hack_fast_exit.png" /><p class="caption"></p>
+</div>
+<h2 id="lockett.ca"><a href="http://www.lockett.ca">lockett.ca</a></h2>
+</body>
+</html>
